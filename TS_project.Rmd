@@ -1,0 +1,193 @@
+---
+title: "T\S_PROJECT"
+author: "Ritika Lohadiya"
+date: "March 16, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+library(data.table)
+library(caret)
+library(astsa)
+library(fpp)
+library(nlme)
+library(magrittr)
+library(splitstackshape)
+library(xts)
+library(dummies)
+library(stats)
+library(dplyr)
+
+pokemon = fread("300k.csv")
+X = function(x) { ifelse(x == "true",1,0)}
+pokemon[,57:207] = lapply(pokemon[,57:207], X)
+pokemon$pokemon_count = rowSums(pokemon[,57:207]) # Creating the dependent variable total pokemon counts per time
+pokemon$Datetime = as.POSIXct(pokemon$appearedLocalTime,format="%Y-%m-%dT%H:%M:%OS")
+pokemon_ts <- xts(x = pokemon, order.by = pokemon$Datetime)
+pokemon_ts = as.data.frame(pokemon_ts)
+pokemon_ts < -as.ts(pokemon_ts)
+
+#### Subsetting  for city = New York
+pokemon_city = subset(pokemon_ts, pokemon_ts$city == "New_York")
+
+
+## Removing Irrelevant columns
+pokemon_city[,c(5:12,24,30:37,44:49,51:56)] =  NULL
+pokemon_city[,28:178] = NULL
+
+
+# Creating dummies for factor variables
+pokemon_city[,c(5,8,12,13,20,22:25)] = sapply(pokemon_city[,c(5,8,12,13,20,22:25)],as.factor)
+pokemon_city$pokemon_count = as.numeric(pokemon_city$pokemon_count)
+pokemon_dummies <- dummy.data.frame(pokemon_city, names = c("appearedTimeOfDay", "appearedDayOfWeek","closeToWater","weatherIcon","urban","suburban","midurban","rural","terrainType") , sep = ".", drop = FALSE)
+pokemon_dummies[,c(7,11,21,33,41,50,52,54,56,60)] = NULL
+
+## Aggegating data to convert irregular time interval time series into regular spaced time series
+byminute = c("appearedDay","appearedHour","appearedMinute")
+pokemon_dummies[,c(33:36,44,51)]= sapply(pokemon_dummies[,c(33:36,44,51)],as.numeric)
+pokemon_minute =pokemon_dummies%>%
+    group_by_(.dots = byminute) %>%
+    summarise(pressure = mean(pressure), temperature = mean(temperature),windSpeed = mean(windSpeed),windBearing = mean(windBearing), population_density = mean(population_density),pokemon_count = sum(pokemon_count))
+pokemon_minute = pokemon_minute[order(pokemon_minute$appearedDay),]
+```
+
+# Checking stationarity and transforming non-stationary series to stationary
+```{r}
+
+# Y variable
+tsdisplay(pokemon_minute$pokemon_count)
+tsdisplay(diff(pokemon_minute$pokemon_count))
+adf.test(diff(pokemon_minute$pokemon_count)) # Stationary
+kpss.test(diff(pokemon_minute$Pokemon_count)) # Stationary
+
+count_diff =c(NA,diff(pokemon_minute$pokemon_count))
+pokemon_minute$count_diff =count_diff
+
+# X variables
+
+# 1. temperature
+tsdisplay(pokemon_minute$temperature)
+tsdisplay(diff(pokemon_minute$temperature))
+adf.test(diff(pokemon_minute$temperature)) # Stationary
+kpss.test(diff(pokemon_minute$temperature)) # Stationary
+
+temp_diff = c(NA,diff(pokemon_minute$temperature))
+pokemon_minute$temp_diff = temp_diff
+
+#2. Wind Pressure
+tsdisplay(pokemon_minute$pressure)
+tsdisplay(diff(pokemon_minute$pressure))
+adf.test(diff(pokemon_minute$pressure)) # Stationary
+kpss.test(diff(pokemon_minute$pressure)) # Stationary
+
+pressure_diff = c(NA,diff(as.numeric(pokemon_minute$pressure)))
+pokemon_minute$pressure_diff = pressure_diff
+
+#3. Wind Bearing
+tsdisplay(pokemon_minute$windBearing)
+tsdisplay(diff(pokemon_minute$windBearing))
+adf.test(diff(pokemon_minute$windBearing)) # Stationary
+kpss.test(diff(pokemon_minute$windBearing)) # Stationary
+
+windBearing_diff = c(NA,diff(pokemon_minute$windBearing))
+pokemon_minute$windBearing_diff = windBearing_diff
+
+# 4. Wind Speed
+
+tsdisplay(pokemon_minute$windSpeed)
+tsdisplay(diff(pokemon_minute$windSpeed))
+adf.test(diff(pokemon_minute$windSpeed)) # Stationary
+kpss.test(diff(pokemon_minute$windSpeed)) # Stationary
+
+windSpeed_diff = c(NA,diff(pokemon_minute$windSpeed))
+pokemon_minute$windSpeed_diff = windSpeed_diff
+
+#5. Population Density
+
+tsdisplay(pokemon_minute$population_density)
+tsdisplay(diff(pokemon_minute$population_density))
+adf.test(diff(pokemon_minute$population_density)) # Stationary
+kpss.test(diff(pokemon_minute$population_density)) # Stationary
+
+population_density_diff = c(NA,diff(pokemon_minute$population_density))
+pokemon_minute$population_density_diff = population_density_diff
+
+```
+
+# Training(0.6) and Test(0.4) data 
+```{r}
+train = pokemon_minute[1:3747,]
+test = pokemon_minute[3748:6246,]
+```
+
+# Simple Linear Regression
+```{r}
+reg = lm(train$pokemon_count~train$pressure + train$temperature + train$windSpeed + train$windBearing +train$population_density)
+summary(reg)
+tsdisplay(reg$residuals)
+```
+
+#Dynamic Regression
+```{r}
+fit <- Arima(train[,15], xreg=train[,10:14], order=c(2,0,0))
+summary(fit)
+tsdisplay(arima.errors(fit), main="ARIMA errors") #MA3 or AR2, ARMA(1,2) turns out to be the best
+
+
+
+fit <- auto.arima(train[,15], xreg=train[,10:14]) 
+tsdisplay(residuals(fit))
+summary(fit) #28216.89
+fit_ma1 = Arima(train[,15], xreg=train[,10:14], order=c(0,0,1))
+summary(fit_ma1) # aic =28229.17
+fit_ar2 = Arima(train[,15], xreg=train[,10:14], order=c(2,1,0))
+summary(fit_ar2) #28386.78
+fit_ar3 = Arima(train[,15], xreg=train[,10:14], order=c(3,0,0))
+summary(fit_ar3) #28273.72
+fit_ar4 = Arima(train[,15], xreg=train[,10:14], order=c(4,0,0))
+summary(fit_ar4) # 28218.89
+fit_ma1ar2 = Arima(train[,15], xreg=train[,10:14], order=c(2,0,1))
+summary(fit_ma1ar2) #28217.52
+fit_ma1ar3 = Arima(train[,15], xreg=train[,10:14], order=c(3,0,1))
+summary(fit_ma1ar3) #28219.18
+fit_ma1ar4 = Arima(train[,15], xreg=train[,10:14], order=c(4,0,1))
+tsdisplay(residuals(fit_ma1ar4))
+summary(fit_ma1ar4) #28218.54
+fit_ma2 = Arima(train[,15], xreg=train[,10:14], order=c(0,0,2))
+summary(fit_ma2) # aic =28224.32
+fit_ma2ar1 = Arima(train[,15], xreg=train[,10:14], order=c(1,0,2))
+summary(fit_ma2ar1) # aic =28221.36
+fit_ma2ar2 = Arima(train[,15], xreg=train[,10:14], order=c(2,0,2))
+summary(fit_ma2ar2) # aic =28219.05
+fit_ma2ar3 = Arima(train[,15], xreg=train[,10:14], order=c(3,0,2))
+summary(fit_ma2ar3) # aic =28221.05
+tsdisplay(residuals(fit_ma2ar3))
+fit_ma2ar4 = Arima(train[,15], xreg=train[,10:14], order=c(4,0,2))
+summary(fit_ma2ar4) # aic =28215.31
+
+fit_ma2ar4 = sarima(train[,15], xreg=train[,10:14], 4,0,2)
+summary(fit_ma2ar4) 
+
+# Test for autocorrelation
+
+Box.test(residuals(fit_ma2ar4),fitdf=5,lag = 10,type="Ljung") # No auto correlation 
+
+
+
+```
+
+# Forecast
+```{r}
+fcast <- forecast(fit_ma2ar4,xreg=test[,10:14])
+plot(fcast, main="Forecasts from regression with ARIMA(4,0,2) errors")
+fcast = as.data.frame(fcast)
+pred =unclass(fcast$`Point Forecast`)
+accuracy(pred,test$count_diff) # 10.9 MPE
+```
+
